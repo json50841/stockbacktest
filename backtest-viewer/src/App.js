@@ -17,31 +17,37 @@ export default function App() {
   const [trades, setTrades] = useState([]);
   const [equity, setEquity] = useState([]);
 
-  // Load CSV
   useEffect(() => {
     fetch(CSV_URL)
       .then((res) => res.text())
       .then((text) => {
-        const parsed = Papa.parse(text, { header: true, skipEmptyLines: true });
+        const parsed = Papa.parse(text, {
+          header: true,
+          skipEmptyLines: true,
+        });
 
+        // -------- Parse Trades --------
         const rows = parsed.data.map((r) => ({
           entryDate: r["Entry Date"],
           exitDate: r["Exit Date"],
+          direction: r["Direction"],
+          shares: Number(r["Shares"]),
           entryPrice: Number(r["Entry Price"]),
           exitPrice: Number(r["Exit Price"]),
-          pnl: Number(r["PnL"]),
+          pnl: Number(r["PnL ($)"]),
+          recovery: r["Recovery Mode"] === "True",
         }));
 
         setTrades(rows);
 
-        // ---- Create equity curve ----
+        // -------- Equity Curve (累计 PnL) --------
         let cumulative = 0;
         const equityRows = rows.map((t) => {
           cumulative += t.pnl;
           return {
             date: t.entryDate,
             pnl: t.pnl,
-            equity: Number(cumulative.toFixed(6)),
+            equity: Number(cumulative.toFixed(2)),
           };
         });
 
@@ -49,24 +55,28 @@ export default function App() {
       });
   }, []);
 
-  if (!equity.length) return <div style={{ padding: 20 }}>Loading data…</div>;
+  if (!equity.length) {
+    return <div style={{ padding: 20 }}>Loading data…</div>;
+  }
 
-  // Summary
-  const totalPnL = equity[equity.length - 1].equity.toFixed(4);
-  const winRate =
-    ((trades.filter((t) => t.pnl > 0).length / trades.length) * 100).toFixed(2);
+  // -------- Summary --------
+  const totalPnL = equity[equity.length - 1].equity.toFixed(2);
+  const winRate = (
+    (trades.filter((t) => t.pnl > 0).length / trades.length) *
+    100
+  ).toFixed(2);
 
   return (
     <div style={{ padding: 20, fontFamily: "Arial" }}>
-      <h2>Equity Curve (资金曲线)</h2>
+      <h2>Equity Curve（资金曲线）</h2>
 
       <div style={{ marginBottom: 20 }}>
         <strong>Total Trades:</strong> {trades.length} <br />
         <strong>Win Rate:</strong> {winRate}% <br />
-        <strong>Total PnL:</strong> {totalPnL}
+        <strong>Total PnL ($):</strong> {totalPnL}
       </div>
 
-      {/* ---- Equity Curve Chart ---- */}
+      {/* ===== Equity Curve ===== */}
       <div style={{ width: "100%", height: 400 }}>
         <ResponsiveContainer>
           <LineChart data={equity}>
@@ -85,7 +95,7 @@ export default function App() {
         </ResponsiveContainer>
       </div>
 
-      {/* ---- Table ---- */}
+      {/* ===== Trade Table ===== */}
       <h3 style={{ marginTop: 30 }}>Trade List</h3>
       <table
         border="1"
@@ -96,9 +106,11 @@ export default function App() {
           <tr>
             <th>Entry Date</th>
             <th>Exit Date</th>
+            <th>Direction</th>
+            <th>Shares</th>
             <th>Entry Price</th>
             <th>Exit Price</th>
-            <th>PnL</th>
+            <th>PnL ($)</th>
           </tr>
         </thead>
         <tbody>
@@ -106,10 +118,19 @@ export default function App() {
             <tr key={i}>
               <td>{t.entryDate}</td>
               <td>{t.exitDate}</td>
-              <td>{t.entryPrice.toFixed(4)}</td>
-              <td>{t.exitPrice.toFixed(4)}</td>
+              <td
+                style={{
+                  color: t.direction === "LONG" ? "green" : "red",
+                  fontWeight: "bold",
+                }}
+              >
+                {t.direction}
+              </td>
+              <td>{t.shares}</td>
+              <td>{t.entryPrice.toFixed(2)}</td>
+              <td>{t.exitPrice.toFixed(2)}</td>
               <td style={{ color: t.pnl >= 0 ? "green" : "red" }}>
-                {t.pnl.toFixed(4)}
+                {t.pnl.toFixed(2)}
               </td>
             </tr>
           ))}

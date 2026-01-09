@@ -15,16 +15,16 @@ import matplotlib.pyplot as plt
 # =========================================================
 class SmaCrossStrategy(bt.Strategy):
     params = dict(
-        fast=10,
-        slow=30,
+        fast=5,
+        slow=15,
 
-        initial_shares=10,          # 初始股票股数
-        max_capital_usage_pct=0.5,  # 单笔最大资金使用比例
+        initial_shares=100,          # 初始股票股数
+        max_capital_usage_pct=0.9,  # 单笔最大资金使用比例
 
-        stop_loss_points=4.0,       # 固定止损点（美元）
-        take_profit_points=4.0,     # 固定止盈点（美元）
+        stop_loss_points=2.5,       # 固定止损点（美元）
+        take_profit_points=2.5,     # 固定止盈点（美元）
 
-        recovery_mult=2             # 亏损后翻倍
+        recovery_mult=2             # Recovery 翻倍系数
     )
 
     def __init__(self):
@@ -56,9 +56,10 @@ class SmaCrossStrategy(bt.Strategy):
     def next(self):
         self.equity_curve.append(self.broker.getvalue())
 
-        # ===== 开仓 =====
+        # ===== 无持仓：准备开仓 =====
         if not self.position:
-            # 正常模式
+
+            # ---------- 正常模式（均线策略） ----------
             if not self.in_recovery:
                 shares = self.p.initial_shares
                 if not self.check_capital(shares):
@@ -72,12 +73,13 @@ class SmaCrossStrategy(bt.Strategy):
                     self.last_trade_direction = "SHORT"
                     self.sell(size=shares)
 
-            # Recovery：反方向 + 翻倍
+            # ---------- Recovery 模式（仅在亏损后） ----------
             else:
                 shares = self.recovery_shares
                 if not self.check_capital(shares):
                     return
 
+                # 严格反方向
                 if self.last_trade_direction == "LONG":
                     self.last_trade_direction = "SHORT"
                     self.sell(size=shares)
@@ -85,7 +87,7 @@ class SmaCrossStrategy(bt.Strategy):
                     self.last_trade_direction = "LONG"
                     self.buy(size=shares)
 
-        # ===== 止盈止损 =====
+        # ===== 有持仓：止盈止损 =====
         else:
             entry = self.position.price
             price = self.data.close[0]
@@ -103,7 +105,7 @@ class SmaCrossStrategy(bt.Strategy):
 
 
     # ------------------------------
-    # 成交回调（CSV 唯一数据来源）
+    # 成交回调（CSV 唯一来源）
     # ------------------------------
     def notify_order(self, order):
         if order.status in [order.Submitted, order.Accepted]:
@@ -114,7 +116,6 @@ class SmaCrossStrategy(bt.Strategy):
             prev_pos = self._prev_pos
 
             price = order.executed.price
-            size = order.executed.size
             dt = bt.num2date(order.executed.dt).strftime("%Y-%m-%d %H:%M")
 
             # ===== 开仓 =====
@@ -135,13 +136,16 @@ class SmaCrossStrategy(bt.Strategy):
                 else:
                     pnl = (self._entry["Entry Price"] - price) * qty
 
-                # 更新 Recovery 状态
+                # -------- Recovery 状态管理（关键修正点） --------
                 if pnl < 0:
+                    # 亏损 → 进入 Recovery
                     self.in_recovery = True
                     self.recovery_shares *= self.p.recovery_mult
                 else:
+                    # 盈利 → 完全回到均线策略
                     self.in_recovery = False
                     self.recovery_shares = self.p.initial_shares
+                    self.last_trade_direction = None  # ⭐ 强制清空方向记忆
 
                 self.trade_log.append({
                     "Entry Date": self._entry["Entry Date"],
@@ -177,22 +181,23 @@ def get_minute_data(symbol):
     })
 
     df["openinterest"] = 0
-    df = df[["open", "high", "low", "close", "volume", "openinterest"]]
-    return df
+    return df[["open", "high", "low", "close", "volume", "openinterest"]]
 
 
 # =========================================================
 # Main
 # =========================================================
 if __name__ == "__main__":
-    data = bt.feeds.PandasData(dataname=get_minute_data("AAPL"),
-                               timeframe=bt.TimeFrame.Minutes,
-                               compression=30)
+    data = bt.feeds.PandasData(
+        dataname=get_minute_data("TSLL"),
+        timeframe=bt.TimeFrame.Minutes,
+        compression=30
+    )
 
     cerebro = bt.Cerebro()
     cerebro.adddata(data)
-
     cerebro.addstrategy(SmaCrossStrategy)
+
     cerebro.broker.setcash(100000)
     cerebro.broker.setcommission(commission=0.001)
 
@@ -201,4 +206,5 @@ if __name__ == "__main__":
     pd.DataFrame(strat.trade_log).to_csv("trades.csv", index=False)
 
     plt.plot(strat.equity_curve)
+    plt.title("Equity Curve")
     plt.savefig("equity_curve.png")

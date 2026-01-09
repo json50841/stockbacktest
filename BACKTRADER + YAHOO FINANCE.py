@@ -1,129 +1,204 @@
+# =========================================================
+# Imports
+# =========================================================
 import matplotlib
-matplotlib.use('Agg')  # Headless mode
+matplotlib.use("Agg")
 
 import backtrader as bt
 import yfinance as yf
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# ---------------- Strategy ----------------
+
+# =========================================================
+# Strategy
+# =========================================================
 class SmaCrossStrategy(bt.Strategy):
-    params = dict(fast=10, slow=30, stop_loss_pct=0.02, take_profit_pct=0.04)
+    params = dict(
+        fast=10,
+        slow=30,
+
+        initial_shares=100,          # 初始股票股数
+        max_capital_usage_pct=0.9,  # 单笔最大资金使用比例
+
+        stop_loss_points=3.0,       # 固定止损点（美元）
+        take_profit_points=3.0,     # 固定止盈点（美元）
+
+        recovery_mult=2             # 亏损后翻倍
+    )
 
     def __init__(self):
-        self.fast_sma = bt.indicators.SimpleMovingAverage(self.data.close, period=self.p.fast)
-        self.slow_sma = bt.indicators.SimpleMovingAverage(self.data.close, period=self.p.slow)
+        self.fast_sma = bt.indicators.SMA(self.data.close, period=self.p.fast)
+        self.slow_sma = bt.indicators.SMA(self.data.close, period=self.p.slow)
+
+        self.in_recovery = False
+        self.recovery_shares = self.p.initial_shares
+        self.last_trade_direction = None
+
         self.trade_log = []
+        self.equity_curve = []
 
+        self._prev_pos = 0
+        self._entry = None
+
+
+    # ------------------------------
+    # 资金检查
+    # ------------------------------
+    def check_capital(self, shares):
+        price = self.data.close[0]
+        return abs(price * shares) <= self.broker.getvalue() * self.p.max_capital_usage_pct
+
+
+    # ------------------------------
+    # 主逻辑
+    # ------------------------------
     def next(self):
+        self.equity_curve.append(self.broker.getvalue())
+
+        # ===== 开仓 =====
         if not self.position:
-            if self.fast_sma[0] > self.slow_sma[0]:
-                self.buy()
+            # 正常模式
+            if not self.in_recovery:
+                shares = self.p.initial_shares
+                if not self.check_capital(shares):
+                    return
+
+                if self.fast_sma[0] > self.slow_sma[0]:
+                    self.last_trade_direction = "LONG"
+                    self.buy(size=shares)
+
+                elif self.fast_sma[0] < self.slow_sma[0]:
+                    self.last_trade_direction = "SHORT"
+                    self.sell(size=shares)
+
+            # Recovery：反方向 + 翻倍
+            else:
+                shares = self.recovery_shares
+                if not self.check_capital(shares):
+                    return
+
+                if self.last_trade_direction == "LONG":
+                    self.last_trade_direction = "SHORT"
+                    self.sell(size=shares)
+                else:
+                    self.last_trade_direction = "LONG"
+                    self.buy(size=shares)
+
+        # ===== 止盈止损 =====
         else:
-            # Stop loss / Take profit
-            if self.data.close[0] <= self.position.price * (1 - self.p.stop_loss_pct):
-                self.close()
-            elif self.data.close[0] >= self.position.price * (1 + self.p.take_profit_pct):
-                self.close()
-            # SMA crossover exit
-            elif self.fast_sma[0] < self.slow_sma[0]:
-                self.close()
+            entry = self.position.price
+            price = self.data.close[0]
 
-    def notify_trade(self, trade):
-        if trade.isclosed:
-            entry_price = trade.price
-            exit_price = trade.price + trade.pnl / trade.size if trade.size != 0 else trade.price
-            # Use self.data.datetime for correct timestamps
-            entry_date = bt.num2date(trade.dtopen).date() if trade.dtopen else ''
-            exit_date = bt.num2date(trade.dtclose).date() if trade.dtclose else ''
+            if self.position.size > 0:
+                if price <= entry - self.p.stop_loss_points:
+                    self.close()
+                elif price >= entry + self.p.take_profit_points:
+                    self.close()
+            else:
+                if price >= entry + self.p.stop_loss_points:
+                    self.close()
+                elif price <= entry - self.p.take_profit_points:
+                    self.close()
 
-            trade_info = {
-                'Entry Date': entry_date,
-                'Exit Date': exit_date,
-                'Entry Price': entry_price,
-                'Exit Price': exit_price,
-                'Size': trade.size,
-                'Stop Loss': entry_price * (1 - self.p.stop_loss_pct),
-                'Take Profit': entry_price * (1 + self.p.take_profit_pct),
-                'PnL': trade.pnl
-            }
-            self.trade_log.append(trade_info)
-            print("Trade closed:", trade_info)
 
-# ---------------- Data ----------------
-def get_data(symbol, start, end):
-    df = yf.download(symbol, start=start, end=end, auto_adjust=False, progress=False)
-    # Ensure single-level columns
+    # ------------------------------
+    # 成交回调（CSV 唯一数据来源）
+    # ------------------------------
+    def notify_order(self, order):
+        if order.status in [order.Submitted, order.Accepted]:
+            return
+
+        if order.status == order.Completed:
+            new_pos = self.position.size
+            prev_pos = self._prev_pos
+
+            price = order.executed.price
+            size = order.executed.size
+            dt = bt.num2date(order.executed.dt).strftime("%Y-%m-%d %H:%M")
+
+            # ===== 开仓 =====
+            if prev_pos == 0 and new_pos != 0:
+                self._entry = {
+                    "Entry Date": dt,
+                    "Direction": "LONG" if new_pos > 0 else "SHORT",
+                    "Shares": abs(new_pos),
+                    "Entry Price": price
+                }
+
+            # ===== 平仓 =====
+            elif prev_pos != 0 and new_pos == 0 and self._entry:
+                qty = self._entry["Shares"]
+
+                if self._entry["Direction"] == "LONG":
+                    pnl = (price - self._entry["Entry Price"]) * qty
+                else:
+                    pnl = (self._entry["Entry Price"] - price) * qty
+
+                # 更新 Recovery 状态
+                if pnl < 0:
+                    self.in_recovery = True
+                    self.recovery_shares *= self.p.recovery_mult
+                else:
+                    self.in_recovery = False
+                    self.recovery_shares = self.p.initial_shares
+
+                self.trade_log.append({
+                    "Entry Date": self._entry["Entry Date"],
+                    "Exit Date": dt,
+                    "Direction": self._entry["Direction"],
+                    "Shares": qty,
+                    "Entry Price": self._entry["Entry Price"],
+                    "Exit Price": price,
+                    "PnL ($)": pnl
+                })
+
+                self._entry = None
+
+            self._prev_pos = new_pos
+
+
+# =========================================================
+# Data
+# =========================================================
+def get_minute_data(symbol):
+    df = yf.download(symbol, period="60d", interval="30m",
+                     auto_adjust=True, progress=False)
+
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    df.index = pd.to_datetime(df.index)
+
+    df = df.rename(columns={
+        "Open": "open",
+        "High": "high",
+        "Low": "low",
+        "Close": "close",
+        "Volume": "volume"
+    })
+
+    df["openinterest"] = 0
+    df = df[["open", "high", "low", "close", "volume", "openinterest"]]
     return df
 
-# ---------------- HTML Report ----------------
-def save_html_from_csv(csv_file, html_file, equity_curve_img=None):
-    df = pd.read_csv(csv_file)
-    equity_img_html = f'<img src="{equity_curve_img}" alt="Equity Curve">' if equity_curve_img else ''
-    
-    html_str = f'''
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-    <meta charset="UTF-8">
-    <title>Backtest Report</title>
-    <link rel="stylesheet" type="text/css" 
-          href="https://cdn.datatables.net/1.13.6/css/jquery.dataTables.css">
-    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-    <script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.js"></script>
-    </head>
-    <body>
-    <h2>Backtest Report</h2>
-    {equity_img_html}
-    {df.to_html(index=False, classes='display', table_id='trade_table')}
-    <script>
-      $(document).ready(function () {{
-          $('#trade_table').DataTable({{ "pageLength": 25 }});
-      }});
-    </script>
-    </body>
-    </html>
-    '''
-    with open(html_file, 'w') as f:
-        f.write(html_str)
 
-# ---------------- Main ----------------
+# =========================================================
+# Main
+# =========================================================
 if __name__ == "__main__":
-    symbol = "AAPL"
-    start_date = "2010-01-01"
-    end_date = "2024-01-01"
-
-    df = get_data(symbol, start_date, end_date)
-    data_feed = bt.feeds.PandasData(dataname=df)  # pass dataframe, not tuple
+    data = bt.feeds.PandasData(dataname=get_minute_data("SQQQ"),
+                               timeframe=bt.TimeFrame.Minutes,
+                               compression=30)
 
     cerebro = bt.Cerebro()
-    cerebro.adddata(data_feed)
-    cerebro.addstrategy(SmaCrossStrategy)
+    cerebro.adddata(data)
 
+    cerebro.addstrategy(SmaCrossStrategy)
     cerebro.broker.setcash(100000)
     cerebro.broker.setcommission(commission=0.001)
 
-    print("Starting Portfolio Value:", cerebro.broker.getvalue())
-    results = cerebro.run()
-    strategy_instance = results[0]
-    print("Final Portfolio Value:", cerebro.broker.getvalue())
+    strat = cerebro.run()[0]
 
-    # ---------------- Save Trades ----------------
-    trades_df = pd.DataFrame(strategy_instance.trade_log)
-    trades_csv = 'trades.csv'
-    trades_df.to_csv(trades_csv, index=False)
-    print(f"Trades saved to {trades_csv}")
+    pd.DataFrame(strat.trade_log).to_csv("trades.csv", index=False)
 
-    # ---------------- Equity Curve ----------------
-    plt.figure(figsize=(10,6))
-    plt.plot(df.index, [cerebro.broker.startingcash]*len(df), label='Portfolio Value')  # simple curve
-    equity_curve_img = 'equity_curve.png'
-    plt.savefig(equity_curve_img)
-
-    # ---------------- Convert CSV → Interactive HTML ----------------
-    trades_html = 'backtest_report.html'
-    save_html_from_csv(trades_csv, trades_html, equity_curve_img)
-    print(f"HTML report saved to {trades_html}")
+    plt.plot(strat.equity_curve)
+    plt.savefig("equity_curve.png")

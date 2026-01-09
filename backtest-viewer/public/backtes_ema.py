@@ -14,8 +14,8 @@ class EMAStrategy(bt.Strategy):
         fast_period=9,
         slow_period=21,
         initial_shares=100,
-        stop_loss_cash=300,
-        take_profit_cash=300,
+        stop_loss_cash=10.0,
+        take_profit_cash=10.0,
         recovery_mult=2,
         max_capital_pct=0.9,
     )
@@ -330,11 +330,11 @@ th {{ background: #f2f2f2; }}
 # Run
 # =========================================================
 def run():
-    symbol = "BITX"
-    file_path = "BITX_M30_202306271630_202601072230.csv"
+    symbol = "BOIL"
+    file_path = "BOIL_M30_202001021630_202601082230.csv"
 
-    start_date = "2024-01-01"
-    end_date = "2024-04-01"
+    start_date = "2020-07-01"
+    end_date = "2024-10-01"
 
     df = load_m30_csv(file_path, start_date=start_date, end_date=end_date)
 

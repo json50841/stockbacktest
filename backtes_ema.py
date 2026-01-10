@@ -14,8 +14,8 @@ class EMAStrategy(bt.Strategy):
         fast_period=9,
         slow_period=21,
         initial_shares=100,
-        stop_loss_cash=1.5*100,
-        take_profit_cash=1.5*100,
+        stop_loss_cash=10.0,
+        take_profit_cash=10.0,
         recovery_mult=2,
         max_capital_pct=0.9,
     )
@@ -134,7 +134,7 @@ def load_m30_csv(file_path, start_date=None, end_date=None):
     return df
 
 # =========================================================
-# HTML Report
+# HTML Report (原 generate_html)
 # =========================================================
 def generate_html(symbol, params, equity_curve, trades):
     total_trades = len(trades)
@@ -239,55 +239,41 @@ new Chart(document.getElementById("equityChart"), {{
 # =========================================================
 def grid_backtest(symbol, df, initial_shares=100):
     results = []
-
-    # 步长 0.5，从 0.1 到 5，作为单手金额
-    single_trade_values = [round(0.1 + 0.5*i, 2) for i in range(int((5-0.1)/0.5)+1)]
-
-    for cash_per_share in single_trade_values:
-        stop_loss_cash = cash_per_share * initial_shares
-        take_profit_cash = stop_loss_cash  # 止盈和止损金额相同
-
+    stop_loss_values = [round(0.1 + 0.5*i, 2) * initial_shares for i in range(int((5-0.1)/0.5)+1)]
+    for stop_loss in stop_loss_values:
+        take_profit = stop_loss
         cerebro = bt.Cerebro()
         data = bt.feeds.PandasData(dataname=df)
         cerebro.adddata(data)
         cerebro.broker.setcash(100000)
         cerebro.broker.setcommission(commission=0.001)
-
-        cerebro.addstrategy(
-            EMAStrategy,
-            initial_shares=initial_shares,
-            stop_loss_cash=stop_loss_cash,
-            take_profit_cash=take_profit_cash
-        )
-
+        cerebro.addstrategy(EMAStrategy, initial_shares=initial_shares, stop_loss_cash=stop_loss, take_profit_cash=take_profit)
         strat = cerebro.run()[0]
 
         total_trades = len(strat.trade_log)
         wins = sum(1 for t in strat.trade_log if t["PnL ($)"] > 0)
         losses = total_trades - wins
-        total_pnl = round(sum(t["PnL ($)"] for t in strat.trade_log), 2)
+        total_pnl = round(sum(t["PnL ($)"] for t in strat.trade_log),2)
         win_rate = (wins / total_trades * 100) if total_trades else 0
 
         results.append({
             "fast_period": 9,
             "slow_period": 21,
             "initial_shares": initial_shares,
-            "stop_loss_cash": stop_loss_cash,
-            "take_profit_cash": take_profit_cash,
+            "stop_loss_cash": stop_loss,
+            "take_profit_cash": take_profit,
             "recovery_mult": 2,
             "Total Trades": total_trades,
-            "Win Rate (%)": round(win_rate, 2),
+            "Win Rate (%)": round(win_rate,2),
             "Total PnL": total_pnl,
             "Winning Trades": wins,
             "Losing Trades": losses,
             "strategy_obj": strat
         })
 
-    # 按总收益排序，中位数标记
     results_sorted = sorted(results, key=lambda x: x["Total PnL"])
     mid_index = len(results_sorted)//2
     results_sorted[mid_index]["is_mid"] = True
-
     return results_sorted, results_sorted[mid_index]
 
 # =========================================================
@@ -346,18 +332,21 @@ th {{ background: #f2f2f2; }}
 def run():
     symbol = "BOIL"
     file_path = "BOIL_M30_202001021630_202601082230.csv"
-    start_date = "2023-07-01"
+
+    start_date = "2020-07-01"
     end_date = "2024-10-01"
 
     df = load_m30_csv(file_path, start_date=start_date, end_date=end_date)
 
-    # ---------------- 网格回测 ----------------
+    # 网格搜索
     grid_results, mid_result = grid_backtest(symbol, df)
+
+    # 网格 HTML
     generate_grid_html(symbol, grid_results)
 
-    # 网格中位结果 HTML
+    # 中位结果单策略报告
     strat = mid_result["strategy_obj"]
-    mid_params = {
+    params = {
         "fast_period": mid_result["fast_period"],
         "slow_period": mid_result["slow_period"],
         "initial_shares": mid_result["initial_shares"],
@@ -366,35 +355,9 @@ def run():
         "recovery_mult": mid_result["recovery_mult"]
     }
     pd.DataFrame(strat.trade_log).to_csv(f"{symbol}_Mid_Result_Trades.csv", index=False)
-    generate_html(symbol, mid_params, strat.equity_curve, strat.trade_log)
+    generate_html(symbol, params, strat.equity_curve, strat.trade_log)
 
     print("Grid Backtest finished")
-
-    # ---------------- 固定参数回测 ----------------
-    fixed_params = dict(
-        fast_period=9,
-        slow_period=21,
-        initial_shares=100,
-        stop_loss_cash=150,
-        take_profit_cash=150,
-        recovery_mult=2,
-    )
-
-    cerebro = bt.Cerebro()
-    data = bt.feeds.PandasData(dataname=df)
-    cerebro.adddata(data)
-    cerebro.broker.setcash(100000)
-    cerebro.broker.setcommission(commission=0.001)
-    cerebro.addstrategy(EMAStrategy, **fixed_params)
-    fixed_strat = cerebro.run()[0]
-
-    fixed_params_dict = {k: v for k, v in fixed_strat.params._getitems()}  # 修正 _getitems()
-
-    pd.DataFrame(fixed_strat.trade_log).to_csv(f"{symbol}_Fixed_Params_Trades.csv", index=False)
-    generate_html(symbol, fixed_params_dict, fixed_strat.equity_curve, fixed_strat.trade_log)
-
-    print("Fixed Params HTML report generated: {}_Backtest_Report.html".format(symbol))
-    print("Fixed Params Backtest finished")
 
 if __name__ == "__main__":
     run()

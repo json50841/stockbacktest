@@ -13,14 +13,14 @@ CSV_FILE = "EURUSD_M30_202001100000_202601092330.csv"
 START_DATE = "2025-01-01"
 END_DATE   = "2026-01-01"
 
-INITIAL_CASH = 100000
+INITIAL_CASH = 20000
 
 # ===== 外汇参数 =====
 LOT_SIZE = 0.01
 INITIAL_SHARES = LOT_SIZE
 CONTRACT_SIZE = 100000
 LEVERAGE = 30
-POINT = 0.0001
+POINT = 0.00001
 
 FAST_EMA = 9
 SLOW_EMA = 21
@@ -29,7 +29,7 @@ MARTINGALE_MULT = 2
 INITIAL_CASH_BASE = 100  # 400 点
 
 LOOKBACK_MONTHS = 3
-GRID_RANGE = np.arange(100, 1001, 200)  # cash_base 单位：点
+GRID_RANGE = np.arange(100, 800, 200)  # cash_base 单位：点
 
 # =========================================================
 # 数据加载

@@ -7,23 +7,29 @@ from dateutil.relativedelta import relativedelta
 # =========================================================
 # 全局参数
 # =========================================================
-SYMBOL = "TQQQ"
-CSV_FILE = "TQQQ_M30_202505231630_202601082300.csv"
+SYMBOL = "GBPUSD"
+CSV_FILE = "GBPUSD_M30_202001100000_202601092330.csv"
 
 START_DATE = "2025-01-01"
 END_DATE   = "2026-01-01"
 
 INITIAL_CASH = 20000
-INITIAL_SHARES = 100
+
+# ===== 外汇参数 =====
+LOT_SIZE = 0.01
+INITIAL_SHARES = LOT_SIZE
+CONTRACT_SIZE = 100000
+LEVERAGE = 30
+POINT = 0.00001
 
 FAST_EMA = 9
 SLOW_EMA = 21
 
 MARTINGALE_MULT = 2
-INITIAL_CASH_BASE = 1.5
+INITIAL_CASH_BASE = 800  # 400 点
 
 LOOKBACK_MONTHS = 3
-GRID_RANGE = np.arange(0.1, 6.01, 0.5)
+GRID_RANGE = np.arange(400, 2000, 300)  # cash_base 单位：点
 
 # =========================================================
 # 数据加载
@@ -46,38 +52,36 @@ def load_data(path, start, end):
 # =========================================================
 def run_single_backtest(df, cash_base, initial_cash=INITIAL_CASH):
     cash = initial_cash
-    shares = INITIAL_SHARES
+    lots = INITIAL_SHARES
     pos = None
     entry_price = None
     martingale_level = 0
-    max_shares = 16  # 最大马丁手数限制
+    max_lots = 1600 * LOT_SIZE
 
     for _, row in df.iterrows():
         price = row.close
 
-        # === 持仓处理 ===
         if pos:
-            pnl = (price - entry_price) * shares if pos == "LONG" else (entry_price - price) * shares
-            threshold = cash_base * shares
+            pnl_points = (price - entry_price) / POINT if pos == "LONG" else (entry_price - price) / POINT
+            pnl = pnl_points * POINT * CONTRACT_SIZE * lots
+            threshold = cash_base * POINT * CONTRACT_SIZE * lots
 
             if abs(pnl) >= threshold:
                 cash += pnl
 
                 if pnl > 0:
-                    shares = INITIAL_SHARES
+                    lots = INITIAL_SHARES
                     martingale_level = 0
                 else:
-                    shares = min(shares * MARTINGALE_MULT, max_shares)
+                    lots = min(lots * MARTINGALE_MULT, max_lots)
                     martingale_level += 1
 
                 pos = None
                 entry_price = None
 
-        # === 开仓（资金检查） ===
         if not pos:
-            required_cash = shares * price
-            if cash < required_cash:
-                # 资金不足时直接判定为大亏损
+            margin_required = price * CONTRACT_SIZE * lots / LEVERAGE
+            if cash < margin_required:
                 return -1e9
 
             if row.ema_fast > row.ema_slow:
@@ -87,42 +91,28 @@ def run_single_backtest(df, cash_base, initial_cash=INITIAL_CASH):
                 pos = "SHORT"
                 entry_price = price
 
-    # 返回净盈亏
     return cash - initial_cash
 
-
 # =========================================================
-# Grid 搜索回测（过去 n 个月，返回中位及之后现金基准）
+# 回望网格搜索
 # =========================================================
-def grid_search_lookback(df, cash_values=GRID_RANGE):
-    """
-    df: pandas DataFrame，回望数据
-    cash_values: 网格现金基准
-    return: 中位及之后的现金基准
-    """
+def grid_search(df):
     results = []
-
-    for cb in cash_values:
+    for cb in GRID_RANGE:
         pnl = run_single_backtest(df, cb)
-        results.append({"cash_base": cb, "pnl": pnl})
+        results.append((cb, pnl))
 
-    # 按净盈亏升序排序
-    results_sorted = sorted(results, key=lambda x: x["pnl"])
-
-    # 选取中位及之后（盈利中等及以上）
-    mid_index = len(results_sorted) // 2
-    selected = results_sorted[mid_index:]
-
-    # 返回第一个作为应用参数
-    return selected[0]["cash_base"]
-
+    results.sort(key=lambda x: x[1])
+    mid = len(results) // 2
+    selected = results[mid:]
+    return max(selected, key=lambda x: x[0])[0]
 
 # =========================================================
-# 修改 main_backtest 使用 grid_search_lookback
+# 主 Walk-Forward 回测
 # =========================================================
 def main_backtest(df):
     cash = INITIAL_CASH
-    shares = INITIAL_SHARES
+    lots = INITIAL_SHARES
     pos = None
     entry_price = None
     entry_time = None
@@ -138,17 +128,15 @@ def main_backtest(df):
         price = row.close
         equity_curve.append(round(cash, 2))
 
-        # === 是否触发回望参数更新 ===
         if time >= last_grid_time + relativedelta(months=LOOKBACK_MONTHS):
-            lookback_start = time - relativedelta(months=LOOKBACK_MONTHS)
-            lookback_df = df.loc[lookback_start:time]
-            current_cash_base = grid_search_lookback(lookback_df)
+            lookback_df = df.loc[time - relativedelta(months=LOOKBACK_MONTHS):time]
+            current_cash_base = grid_search(lookback_df)
             last_grid_time = time
 
-        # === 平仓判断 ===
         if pos:
-            pnl = (price - entry_price) * shares if pos == "LONG" else (entry_price - price) * shares
-            threshold = current_cash_base * shares
+            pnl_points = (price - entry_price) / POINT if pos == "LONG" else (entry_price - price) / POINT
+            pnl = pnl_points * POINT * CONTRACT_SIZE * lots
+            threshold = current_cash_base * POINT * CONTRACT_SIZE * lots
 
             if abs(pnl) >= threshold:
                 cash += pnl
@@ -157,39 +145,35 @@ def main_backtest(df):
                     "Entry Time": entry_time,
                     "Exit Time": time,
                     "Direction": pos,
-                    "Shares": shares,
+                    "Lots": lots,
                     "Martingale Level": martingale_level,
                     "Cash Base": current_cash_base,
-                    "Entry Price": round(entry_price, 2),
-                    "Exit Price": round(price, 2),
+                    "Entry Price": round(entry_price, 5),
+                    "Exit Price": round(price, 5),
                     "PnL": round(pnl, 2),
                     "Equity": round(cash, 2)
                 })
 
-                # === 马丁恢复 / 翻倍 ===
                 if pnl > 0:
-                    shares = INITIAL_SHARES
+                    lots = INITIAL_SHARES
                     martingale_level = 0
                 else:
-                    shares *= MARTINGALE_MULT
+                    lots *= MARTINGALE_MULT
                     martingale_level += 1
 
                 pos = None
-                entry_price = None
-                entry_time = None
 
-        # === 开仓（资金是否足够） ===
         if not pos:
-            required_cash = shares * price
-
-            if row.ema_fast > row.ema_slow and cash >= required_cash:
-                pos = "LONG"
-                entry_price = price
-                entry_time = time
-            elif row.ema_fast < row.ema_slow and cash >= required_cash:
-                pos = "SHORT"
-                entry_price = price
-                entry_time = time
+            margin_required = price * CONTRACT_SIZE * lots / LEVERAGE
+            if cash >= margin_required:
+                if row.ema_fast > row.ema_slow:
+                    pos = "LONG"
+                    entry_price = price
+                    entry_time = time
+                elif row.ema_fast < row.ema_slow:
+                    pos = "SHORT"
+                    entry_price = price
+                    entry_time = time
 
     return trades, equity_curve
 
@@ -216,7 +200,7 @@ def generate_html(trades, equity):
 <td>{t['Entry Time']}</td>
 <td>{t['Exit Time']}</td>
 <td style="color:{dcol};font-weight:bold">{t['Direction']}</td>
-<td>{t['Shares']}</td>
+<td>{t['Lots']}</td>
 <td>{t['Martingale Level']}</td>
 <td>{t['Cash Base']}</td>
 <td>{t['Entry Price']}</td>

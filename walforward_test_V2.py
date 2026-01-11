@@ -7,8 +7,8 @@ from dateutil.relativedelta import relativedelta
 # =========================================================
 # 全局参数
 # =========================================================
-SYMBOL = "BOIL"
-CSV_FILE = "BOIL_M30_202001021630_202601082230.csv"
+SYMBOL = "TQQQ"
+CSV_FILE = "TQQQ_M30_202505231630_202601082300.csv"
 
 START_DATE = "2025-01-01"
 END_DATE   = "2026-01-01"
